@@ -1,16 +1,26 @@
 import OpenAI from 'openai';
 
-const deepseek = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY!,
-  baseURL: 'https://api.deepseek.com/v1',
-  maxRetries: 0, // We handle retries ourselves
-});
+let deepseek: OpenAI | null = null;
+
+function getClient(): OpenAI {
+  if (!deepseek) {
+    if (!process.env.DEEPSEEK_API_KEY) {
+      throw new Error('DEEPSEEK_API_KEY environment variable is not set');
+    }
+    deepseek = new OpenAI({
+      apiKey: process.env.DEEPSEEK_API_KEY,
+      baseURL: 'https://api.deepseek.com/v1',
+      maxRetries: 0,
+    });
+  }
+  return deepseek;
+}
 
 export async function callDeepseek(
   messages: { role: 'system' | 'user' | 'assistant'; content: string }[],
   options?: { responseFormat?: 'json_object' | 'text'; maxTokens?: number }
 ) {
-  const response = await deepseek.chat.completions.create({
+  const response = await getClient().chat.completions.create({
     model: 'deepseek-chat',
     messages,
     temperature: 0.7,
