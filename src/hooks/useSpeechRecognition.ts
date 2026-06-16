@@ -8,101 +8,138 @@ export function useSpeechRecognition() {
   const recognitionRef = useRef<any>(null);
   const resolveRef = useRef<((value: string) => void) | null>(null);
   const finalTranscriptRef = useRef('');
+  const permissionRequestedRef = useRef(false);
 
   const isSupported =
     typeof window !== 'undefined' &&
     (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition);
 
+  /**
+   * Request microphone permission explicitly via getUserMedia.
+   * This separates the permission prompt from SpeechRecognition.start(),
+   * which works better on some mobile browsers (especially Chinese ROMs).
+   */
+  const requestMicrophonePermission = useCallback(async (): Promise<boolean> => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      return false;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Stop all tracks immediately — we only needed the permission grant
+      stream.getTracks().forEach(track => track.stop());
+      permissionRequestedRef.current = true;
+      return true;
+    } catch (err: any) {
+      console.warn('Microphone permission denied:', err.message);
+      return false;
+    }
+  }, []);
+
   const start = useCallback((): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      if (!isSupported) {
-        const msg = '当前浏览器不支持语音识别';
-        setError(msg);
-        reject(new Error(msg));
-        return;
-      }
+    return new Promise<string>((resolve, reject) => {
+      (async () => {
+        if (!isSupported) {
+          const msg = '当前浏览器不支持语音识别';
+          setError(msg);
+          reject(new Error(msg));
+          return;
+        }
 
-      if (typeof window !== 'undefined' &&
-          window.location.protocol !== 'https:' &&
-          window.location.hostname !== 'localhost') {
-        console.warn('Page loaded over HTTP — speech recognition may not work on some browsers');
-      }
+        if (typeof window !== 'undefined' &&
+            window.location.protocol !== 'https:' &&
+            window.location.hostname !== 'localhost') {
+          console.warn('Page loaded over HTTP — speech recognition may not work on some browsers');
+        }
 
-      // Stop any existing recognition
-      if (recognitionRef.current) {
-        try { recognitionRef.current.abort(); } catch {}
-      }
-
-      const SpeechRecognition =
-        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      const recognition = new SpeechRecognition();
-      recognitionRef.current = recognition;
-      resolveRef.current = resolve;
-
-      recognition.lang = 'en-US';
-      recognition.interimResults = true;
-      recognition.continuous = true; // allow pauses without ending
-      recognition.maxAlternatives = 1;
-
-      finalTranscriptRef.current = '';
-
-      recognition.onresult = (event: any) => {
-        let interim = '';
-        // Process results from end to get latest final
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const transcript = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
-            finalTranscriptRef.current += transcript;
-          } else {
-            interim += transcript;
+        // Preflight: explicitly request microphone permission
+        // This is critical on some mobile browsers (Huawei/HarmonyOS, etc.)
+        // where SpeechRecognition.start() doesn't trigger the permission prompt properly.
+        if (!permissionRequestedRef.current) {
+          const granted = await requestMicrophonePermission();
+          if (!granted) {
+            const msg = '麦克风权限被拒绝，请在浏览器设置中允许麦克风访问后重试';
+            setError(msg);
+            reject(new Error(msg));
+            return;
           }
         }
-        setInterimText(interim);
-      };
 
-      recognition.onerror = (event: any) => {
-        setIsListening(false);
-        setInterimText('');
-        let msg = `语音识别错误: ${event.error}`;
-        if (event.error === 'not-allowed') {
-          msg = '麦克风权限被拒绝，请在浏览器设置中允许麦克风访问';
-        } else if (event.error === 'no-speech') {
-          msg = '未检测到语音，请重试';
-        } else if (event.error === 'aborted') {
-          msg = '语音识别被中断';
-        } else if (event.error === 'service-not-allowed') {
-          msg = '当前浏览器不支持语音识别服务（非 HTTPS 页面下不可用）';
+        // Stop any existing recognition
+        if (recognitionRef.current) {
+          try { recognitionRef.current.abort(); } catch {}
         }
-        setError(msg);
-        if (resolveRef.current) {
-          const final = finalTranscriptRef.current.trim();
-          if (final) {
-            resolveRef.current(final);
+
+        const SpeechRecognition =
+          (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        const recognition = new SpeechRecognition();
+        recognitionRef.current = recognition;
+        resolveRef.current = resolve;
+
+        recognition.lang = 'en-US';
+        recognition.interimResults = true;
+        recognition.continuous = true; // allow pauses without ending
+        recognition.maxAlternatives = 1;
+
+        finalTranscriptRef.current = '';
+
+        recognition.onresult = (event: any) => {
+          let interim = '';
+          // Process results from end to get latest final
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+              finalTranscriptRef.current += transcript;
+            } else {
+              interim += transcript;
+            }
           }
-        }
-        reject(new Error(msg));
-      };
+          setInterimText(interim);
+        };
 
-      recognition.onend = () => {
-        setIsListening(false);
-        // Auto-resolve with whatever we have on end
-        if (resolveRef.current && !finalTranscriptRef.current) {
-          // do nothing — user will manually stop or restart
-        }
-      };
+        recognition.onerror = (event: any) => {
+          setIsListening(false);
+          setInterimText('');
+          let msg = `语音识别错误: ${event.error}`;
+          if (event.error === 'not-allowed') {
+            msg = '麦克风权限被拒绝，请在浏览器设置中允许麦克风访问';
+          } else if (event.error === 'no-speech') {
+            msg = '未检测到语音，请重试';
+          } else if (event.error === 'aborted') {
+            msg = '语音识别被中断';
+          } else if (event.error === 'service-not-allowed') {
+            msg = '当前浏览器不支持语音识别服务（非 HTTPS 页面下不可用）';
+          }
+          setError(msg);
+          if (resolveRef.current) {
+            const final = finalTranscriptRef.current.trim();
+            if (final) {
+              resolveRef.current(final);
+            }
+          }
+          reject(new Error(msg));
+        };
 
-      setIsListening(true);
-      setError(null);
-      try {
-        recognition.start();
-      } catch (e: any) {
-        setIsListening(false);
-        const msg = '启动语音识别失败: ' + (e.message || '');
-        setError(msg);
-        reject(new Error(msg));
-      }
+        recognition.onend = () => {
+          setIsListening(false);
+          // Auto-resolve with whatever we have on end
+          if (resolveRef.current && !finalTranscriptRef.current) {
+            // do nothing — user will manually stop or restart
+          }
+        };
+
+        setIsListening(true);
+        setError(null);
+        try {
+          recognition.start();
+        } catch (e: any) {
+          setIsListening(false);
+          const msg = '启动语音识别失败: ' + (e.message || '');
+          setError(msg);
+          reject(new Error(msg));
+        }
+      })().catch(reject);
     });
-  }, [isSupported]);
+  }, [isSupported, requestMicrophonePermission]);
 
   const stop = useCallback(() => {
     if (recognitionRef.current) {

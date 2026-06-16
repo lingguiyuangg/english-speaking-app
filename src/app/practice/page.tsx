@@ -360,8 +360,9 @@ export default function PracticePage() {
 
           {/* Audio error */}
           {audio.error && (
-            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-2 text-xs text-yellow-700">
-              🔊 语音播放遇到问题，已切换到浏览器自带语音。您可能需要重新点击播放按钮。
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-xs text-yellow-700 space-y-1">
+              <p>🔊 {audio.error}</p>
+              <p className="text-[11px] opacity-75">提示：若仍无声音，请检查手机媒体音量、静音模式，或尝试连接蓝牙耳机后重试</p>
             </div>
           )}
 
