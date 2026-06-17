@@ -35,9 +35,16 @@ export default function ReviewPage() {
 
   const handleVoiceInput = useCallback(async () => {
     try {
-      const transcript = await speech.start();
-      if (transcript) {
-        setSentence(transcript);
+      if (speech.isCloud) {
+        const transcript = await speech.startCloud();
+        if (transcript) {
+          setSentence(transcript);
+        }
+      } else {
+        const transcript = await speech.start();
+        if (transcript) {
+          setSentence(transcript);
+        }
       }
     } catch (err: any) {
       setVoiceError(err.message || '语音识别失败');
@@ -45,9 +52,13 @@ export default function ReviewPage() {
   }, [speech]);
 
   const handleStopVoice = useCallback(() => {
-    const result = speech.stop();
-    if (result) {
-      setSentence(result);
+    if (speech.isCloud) {
+      speech.stopCloud();
+    } else {
+      const result = speech.stop();
+      if (result) {
+        setSentence(result);
+      }
     }
   }, [speech]);
 
@@ -213,7 +224,7 @@ export default function ReviewPage() {
                   disabled={loading}
                   className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-600"
                 >
-                  🎤 语音输入
+                  🎤 {speech.isCloud ? '云端识别' : '语音输入'}
                 </button>
               )
             )}

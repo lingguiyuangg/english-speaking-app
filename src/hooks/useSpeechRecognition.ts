@@ -1,6 +1,8 @@
 'use client';
 import { useState, useRef, useCallback } from 'react';
 
+type SpeechMode = 'native' | 'cloud' | null;
+
 export function useSpeechRecognition() {
   const [isListening, setIsListening] = useState(false);
   const [interimText, setInterimText] = useState('');
@@ -10,14 +12,29 @@ export function useSpeechRecognition() {
   const finalTranscriptRef = useRef('');
   const permissionRequestedRef = useRef(false);
 
-  const isSupported =
+  // Cloud ASR state
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const cloudChunksRef = useRef<Blob[]>([]);
+  const cloudResolveRef = useRef<((value: string) => void) | null>(null);
+
+  // Detect available speech recognition mode
+  const hasNativeSpeech =
     typeof window !== 'undefined' &&
     (!!(window as any).SpeechRecognition || !!(window as any).webkitSpeechRecognition);
 
+  const hasGetUserMedia =
+    typeof navigator !== 'undefined' &&
+    !!navigator.mediaDevices?.getUserMedia;
+
+  const mode: SpeechMode = hasNativeSpeech ? 'native' : (hasGetUserMedia ? 'cloud' : null);
+  const isCloud = mode === 'cloud';
+
+  const isSupported = mode !== null;
+
   /**
    * Request microphone permission explicitly via getUserMedia.
-   * This separates the permission prompt from SpeechRecognition.start(),
-   * which works better on some mobile browsers (especially Chinese ROMs).
+   * Shared between native and cloud paths.
    */
   const requestMicrophonePermission = useCallback(async (): Promise<boolean> => {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
@@ -25,7 +42,6 @@ export function useSpeechRecognition() {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // Stop all tracks immediately — we only needed the permission grant
       stream.getTracks().forEach(track => track.stop());
       permissionRequestedRef.current = true;
       return true;
@@ -35,10 +51,12 @@ export function useSpeechRecognition() {
     }
   }, []);
 
+  // ========== Native Web Speech API ==========
+
   const start = useCallback((): Promise<string> => {
     return new Promise<string>((resolve, reject) => {
       (async () => {
-        if (!isSupported) {
+        if (!hasNativeSpeech) {
           const msg = '当前浏览器不支持语音识别';
           setError(msg);
           reject(new Error(msg));
@@ -52,8 +70,6 @@ export function useSpeechRecognition() {
         }
 
         // Preflight: explicitly request microphone permission
-        // This is critical on some mobile browsers (Huawei/HarmonyOS, etc.)
-        // where SpeechRecognition.start() doesn't trigger the permission prompt properly.
         if (!permissionRequestedRef.current) {
           const granted = await requestMicrophonePermission();
           if (!granted) {
@@ -77,14 +93,13 @@ export function useSpeechRecognition() {
 
         recognition.lang = 'en-US';
         recognition.interimResults = true;
-        recognition.continuous = true; // allow pauses without ending
+        recognition.continuous = true;
         recognition.maxAlternatives = 1;
 
         finalTranscriptRef.current = '';
 
         recognition.onresult = (event: any) => {
           let interim = '';
-          // Process results from end to get latest final
           for (let i = event.resultIndex; i < event.results.length; i++) {
             const transcript = event.results[i][0].transcript;
             if (event.results[i].isFinal) {
@@ -121,10 +136,6 @@ export function useSpeechRecognition() {
 
         recognition.onend = () => {
           setIsListening(false);
-          // Auto-resolve with whatever we have on end
-          if (resolveRef.current && !finalTranscriptRef.current) {
-            // do nothing — user will manually stop or restart
-          }
         };
 
         setIsListening(true);
@@ -139,7 +150,7 @@ export function useSpeechRecognition() {
         }
       })().catch(reject);
     });
-  }, [isSupported, requestMicrophonePermission]);
+  }, [hasNativeSpeech, requestMicrophonePermission]);
 
   const stop = useCallback(() => {
     if (recognitionRef.current) {
@@ -150,7 +161,6 @@ export function useSpeechRecognition() {
     }
     setIsListening(false);
     setInterimText('');
-    // Resolve the promise with whatever was captured
     const final = finalTranscriptRef.current.trim();
     finalTranscriptRef.current = '';
     if (resolveRef.current) {
@@ -160,12 +170,135 @@ export function useSpeechRecognition() {
     return final;
   }, []);
 
+  // ========== Cloud ASR (MediaRecorder + DashScope) ==========
+
+  const sendToCloudRecognize = useCallback(async (blob: Blob): Promise<string> => {
+    try {
+      const response = await fetch('/api/speech/recognize', {
+        method: 'POST',
+        headers: { 'Content-Type': blob.type || 'audio/webm' },
+        body: blob,
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error((err as any).error || `Server error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      return data.text || '';
+    } catch (err: any) {
+      console.error('Cloud ASR request failed:', err);
+      throw err;
+    }
+  }, []);
+
+  const startCloud = useCallback((): Promise<string> => {
+    return new Promise<string>((resolve, reject) => {
+      (async () => {
+        try {
+          // Request mic permission + get stream
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          streamRef.current = stream;
+          permissionRequestedRef.current = true;
+
+          // Detect supported mime type
+          const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+            ? 'audio/webm;codecs=opus'
+            : 'audio/webm';
+
+          const recorder = new MediaRecorder(stream, { mimeType });
+          mediaRecorderRef.current = recorder;
+          cloudChunksRef.current = [];
+          cloudResolveRef.current = resolve;
+
+          recorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+              cloudChunksRef.current.push(event.data);
+            }
+          };
+
+          recorder.onstop = async () => {
+            setIsListening(false);
+            setInterimText('识别中...');
+
+            const blob = new Blob(cloudChunksRef.current, { type: mimeType });
+            stream.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
+
+            try {
+              const text = await sendToCloudRecognize(blob);
+              setInterimText('');
+              if (cloudResolveRef.current) {
+                cloudResolveRef.current(text || '');
+                cloudResolveRef.current = null;
+              }
+            } catch (err: any) {
+              setInterimText('');
+              const msg = '云端语音识别失败: ' + (err.message || '');
+              setError(msg);
+              if (cloudResolveRef.current) {
+                cloudResolveRef.current('');
+                cloudResolveRef.current = null;
+              }
+              reject(new Error(msg));
+            }
+          };
+
+          recorder.onerror = () => {
+            setIsListening(false);
+            stream.getTracks().forEach(track => track.stop());
+            streamRef.current = null;
+            const msg = '录音失败';
+            setError(msg);
+            if (cloudResolveRef.current) {
+              cloudResolveRef.current('');
+              cloudResolveRef.current = null;
+            }
+            reject(new Error(msg));
+          };
+
+          recorder.start(250); // collect data every 250ms
+          setIsListening(true);
+          setError(null);
+        } catch (err: any) {
+          const msg = err.name === 'NotAllowedError'
+            ? '麦克风权限被拒绝，请在浏览器设置中允许麦克风访问后重试'
+            : '启动录音失败: ' + (err.message || '');
+          setError(msg);
+          reject(new Error(msg));
+        }
+      })();
+    });
+  }, [sendToCloudRecognize]);
+
+  const stopCloud = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    } else {
+      setIsListening(false);
+      // If MediaRecorder didn't start, resolve with empty
+      if (cloudResolveRef.current) {
+        cloudResolveRef.current('');
+        cloudResolveRef.current = null;
+      }
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+  }, []);
+
   return {
     isSupported,
+    isCloud,
+    mode,
     isListening,
     interimText,
     error,
     start,
     stop,
+    startCloud,
+    stopCloud,
   };
 }

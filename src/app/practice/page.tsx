@@ -49,13 +49,29 @@ export default function PracticePage() {
     }
   }, [initConversation, router]);
 
+  // Preload TTS audio when a new round loads (critical for mobile autoplay policy)
+  useEffect(() => {
+    const round = state?.rounds?.[state?.currentRoundIndex ?? -1];
+    if (round?.aiContext?.en) {
+      audio.preload(round.aiContext.en, 1.0);
+    }
+  }, [state?.currentRoundIndex, state?.rounds, audio]);
+
   const handleVoiceInput = useCallback(async () => {
     try {
       setVoiceError(null);
-      const transcript = await speech.start();
-      if (transcript) {
-        setSpeechTranscript(transcript);
-        setUserInput(transcript);
+      if (speech.isCloud) {
+        const transcript = await speech.startCloud();
+        if (transcript) {
+          setSpeechTranscript(transcript);
+          setUserInput(transcript);
+        }
+      } else {
+        const transcript = await speech.start();
+        if (transcript) {
+          setSpeechTranscript(transcript);
+          setUserInput(transcript);
+        }
       }
     } catch (err: any) {
       console.error('Voice input error:', err);
@@ -64,10 +80,14 @@ export default function PracticePage() {
   }, [speech]);
 
   const handleStopVoice = useCallback(() => {
-    const result = speech.stop();
-    if (result) {
-      setSpeechTranscript(result);
-      setUserInput(result);
+    if (speech.isCloud) {
+      speech.stopCloud();
+    } else {
+      const result = speech.stop();
+      if (result) {
+        setSpeechTranscript(result);
+        setUserInput(result);
+      }
     }
   }, [speech]);
 
@@ -325,7 +345,7 @@ export default function PracticePage() {
                       </button>
                     ) : (
                       <button onClick={handleVoiceInput} disabled={isLoading} className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-600">
-                        🎤 语音输入
+                        🎤 {speech.isCloud ? '云端识别' : '语音输入'}
                       </button>
                     )
                   )}
@@ -450,6 +470,13 @@ export default function PracticePage() {
       {!speech.isSupported && (
         <p className="text-xs text-gray-400 text-center">
           💡 当前浏览器不支持语音识别，请使用文字输入
+        </p>
+      )}
+
+      {/* Cloud ASR indicator */}
+      {speech.isCloud && (
+        <p className="text-xs text-blue-400 text-center">
+          🎤 云端语音识别模式 — 录音后将进行云端识别
         </p>
       )}
 
